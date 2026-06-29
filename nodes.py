@@ -32,6 +32,42 @@ def update_folder_names_and_paths(key, targets=[]):
 update_folder_names_and_paths("unet_gguf", ["diffusion_models", "unet"])
 update_folder_names_and_paths("clip_gguf", ["text_encoders", "clip"])
 
+MEMORY_MODE_DEFAULT = "default (RAM<->VRAM)"
+MEMORY_MODE_RAM = "RAM only"
+MEMORY_MODE_VRAM = "VRAM only"
+MEMORY_MODE_OPTIONS = [MEMORY_MODE_DEFAULT, MEMORY_MODE_RAM, MEMORY_MODE_VRAM]
+
+def _cpu_device():
+    return torch.device("cpu")
+
+def _vram_device():
+    return comfy.model_management.get_torch_device()
+
+def _text_encoder_vram_device():
+    if hasattr(comfy.model_management, "text_encoder_device"):
+        return comfy.model_management.text_encoder_device()
+    return _vram_device()
+
+def _resolve_devices(memory_mode, *, for_text_encoder=False):
+    if memory_mode == MEMORY_MODE_RAM:
+        device = _cpu_device()
+        return device, device
+    if memory_mode == MEMORY_MODE_VRAM:
+        device = _text_encoder_vram_device() if for_text_encoder else _vram_device()
+        return device, device
+    if for_text_encoder:
+        return None, comfy.model_management.text_encoder_offload_device()
+    return None, None
+
+def _apply_memory_mode(patcher, memory_mode, *, for_text_encoder=False):
+    load_device, offload_device = _resolve_devices(memory_mode, for_text_encoder=for_text_encoder)
+    if load_device is not None:
+        patcher.load_device = load_device
+    if offload_device is not None:
+        patcher.offload_device = offload_device
+    patcher.gguf_memory_mode = memory_mode
+    return patcher
+
 class GGUFModelPatcher(comfy.model_patcher.ModelPatcher):
     patch_on_device = False
 
@@ -128,6 +164,7 @@ class GGUFModelPatcher(comfy.model_patcher.ModelPatcher):
         # GGUF specific clone values below
         n.patch_on_device = getattr(self, "patch_on_device", False)
         n.mmap_released = getattr(self, "mmap_released", False)
+        n.gguf_memory_mode = getattr(self, "gguf_memory_mode", MEMORY_MODE_DEFAULT)
         if src_cls != GGUFModelPatcher:
             n.size = 0 # force recalc
         return n
@@ -139,15 +176,16 @@ class UnetLoaderGGUF:
         return {
             "required": {
                 "unet_name": (unet_names,),
+                "memory_mode": (MEMORY_MODE_OPTIONS, {"default": MEMORY_MODE_DEFAULT}),
             }
         }
 
     RETURN_TYPES = ("MODEL",)
     FUNCTION = "load_unet"
-    CATEGORY = "bootleg"
+    CATEGORY = "ComfyUI-GGUF-MultiMemory"
     TITLE = "Unet Loader (GGUF)"
 
-    def load_unet(self, unet_name, dequant_dtype=None, patch_dtype=None, patch_on_device=None):
+    def load_unet(self, unet_name, memory_mode=MEMORY_MODE_DEFAULT, dequant_dtype=None, patch_dtype=None, patch_on_device=None):
         ops = GGMLOps()
 
         if dequant_dtype in ("default", None):
@@ -181,6 +219,7 @@ class UnetLoaderGGUF:
             raise RuntimeError("ERROR: Could not detect model type of: {}".format(unet_path))
         model = GGUFModelPatcher.clone(model)
         model.patch_on_device = patch_on_device
+        _apply_memory_mode(model, memory_mode)
         return (model,)
 
 class UnetLoaderGGUFAdvanced(UnetLoaderGGUF):
@@ -190,6 +229,7 @@ class UnetLoaderGGUFAdvanced(UnetLoaderGGUF):
         return {
             "required": {
                 "unet_name": (unet_names,),
+                "memory_mode": (MEMORY_MODE_OPTIONS, {"default": MEMORY_MODE_DEFAULT}),
                 "dequant_dtype": (["default", "target", "float32", "float16", "bfloat16"], {"default": "default"}),
                 "patch_dtype": (["default", "target", "float32", "float16", "bfloat16"], {"default": "default"}),
                 "patch_on_device": ("BOOLEAN", {"default": False}),
@@ -205,12 +245,13 @@ class CLIPLoaderGGUF:
             "required": {
                 "clip_name": (s.get_filename_list(),),
                 "type": base["required"]["type"],
+                "memory_mode": (MEMORY_MODE_OPTIONS, {"default": MEMORY_MODE_DEFAULT}),
             }
         }
 
     RETURN_TYPES = ("CLIP",)
     FUNCTION = "load_clip"
-    CATEGORY = "bootleg"
+    CATEGORY = "ComfyUI-GGUF-MultiMemory"
     TITLE = "CLIPLoader (GGUF)"
 
     @classmethod
@@ -232,23 +273,27 @@ class CLIPLoaderGGUF:
             clip_data.append(sd)
         return clip_data
 
-    def load_patcher(self, clip_paths, clip_type, clip_data):
+    def load_patcher(self, clip_paths, clip_type, clip_data, memory_mode=MEMORY_MODE_DEFAULT):
+        initial_device, offload_device = _resolve_devices(memory_mode, for_text_encoder=True)
+        if initial_device is None:
+            initial_device = offload_device
         clip = comfy.sd.load_text_encoder_state_dicts(
             clip_type = clip_type,
             state_dicts = clip_data,
             model_options = {
                 "custom_operations": GGMLOps,
-                "initial_device": comfy.model_management.text_encoder_offload_device()
+                "initial_device": initial_device
             },
             embedding_directory = folder_paths.get_folder_paths("embeddings"),
         )
         clip.patcher = GGUFModelPatcher.clone(clip.patcher)
+        _apply_memory_mode(clip.patcher, memory_mode, for_text_encoder=True)
         return clip
 
-    def load_clip(self, clip_name, type="stable_diffusion"):
+    def load_clip(self, clip_name, type="stable_diffusion", memory_mode=MEMORY_MODE_DEFAULT):
         clip_path = folder_paths.get_full_path("clip", clip_name)
         clip_type = getattr(comfy.sd.CLIPType, type.upper(), comfy.sd.CLIPType.STABLE_DIFFUSION)
-        return (self.load_patcher([clip_path], clip_type, self.load_data([clip_path])),)
+        return (self.load_patcher([clip_path], clip_type, self.load_data([clip_path]), memory_mode),)
 
 class DualCLIPLoaderGGUF(CLIPLoaderGGUF):
     @classmethod
@@ -260,17 +305,18 @@ class DualCLIPLoaderGGUF(CLIPLoaderGGUF):
                 "clip_name1": file_options,
                 "clip_name2": file_options,
                 "type": base["required"]["type"],
+                "memory_mode": (MEMORY_MODE_OPTIONS, {"default": MEMORY_MODE_DEFAULT}),
             }
         }
 
     TITLE = "DualCLIPLoader (GGUF)"
 
-    def load_clip(self, clip_name1, clip_name2, type):
+    def load_clip(self, clip_name1, clip_name2, type, memory_mode=MEMORY_MODE_DEFAULT):
         clip_path1 = folder_paths.get_full_path("clip", clip_name1)
         clip_path2 = folder_paths.get_full_path("clip", clip_name2)
         clip_paths = (clip_path1, clip_path2)
         clip_type = getattr(comfy.sd.CLIPType, type.upper(), comfy.sd.CLIPType.STABLE_DIFFUSION)
-        return (self.load_patcher(clip_paths, clip_type, self.load_data(clip_paths)),)
+        return (self.load_patcher(clip_paths, clip_type, self.load_data(clip_paths), memory_mode),)
 
 class TripleCLIPLoaderGGUF(CLIPLoaderGGUF):
     @classmethod
@@ -281,18 +327,19 @@ class TripleCLIPLoaderGGUF(CLIPLoaderGGUF):
                 "clip_name1": file_options,
                 "clip_name2": file_options,
                 "clip_name3": file_options,
+                "memory_mode": (MEMORY_MODE_OPTIONS, {"default": MEMORY_MODE_DEFAULT}),
             }
         }
 
     TITLE = "TripleCLIPLoader (GGUF)"
 
-    def load_clip(self, clip_name1, clip_name2, clip_name3, type="sd3"):
+    def load_clip(self, clip_name1, clip_name2, clip_name3, type="sd3", memory_mode=MEMORY_MODE_DEFAULT):
         clip_path1 = folder_paths.get_full_path("clip", clip_name1)
         clip_path2 = folder_paths.get_full_path("clip", clip_name2)
         clip_path3 = folder_paths.get_full_path("clip", clip_name3)
         clip_paths = (clip_path1, clip_path2, clip_path3)
         clip_type = getattr(comfy.sd.CLIPType, type.upper(), comfy.sd.CLIPType.STABLE_DIFFUSION)
-        return (self.load_patcher(clip_paths, clip_type, self.load_data(clip_paths)),)
+        return (self.load_patcher(clip_paths, clip_type, self.load_data(clip_paths), memory_mode),)
 
 class QuadrupleCLIPLoaderGGUF(CLIPLoaderGGUF):
     @classmethod
@@ -304,19 +351,20 @@ class QuadrupleCLIPLoaderGGUF(CLIPLoaderGGUF):
             "clip_name2": file_options,
             "clip_name3": file_options,
             "clip_name4": file_options,
+            "memory_mode": (MEMORY_MODE_OPTIONS, {"default": MEMORY_MODE_DEFAULT}),
         }
     }
 
     TITLE = "QuadrupleCLIPLoader (GGUF)"
 
-    def load_clip(self, clip_name1, clip_name2, clip_name3, clip_name4, type="stable_diffusion"):
+    def load_clip(self, clip_name1, clip_name2, clip_name3, clip_name4, type="stable_diffusion", memory_mode=MEMORY_MODE_DEFAULT):
         clip_path1 = folder_paths.get_full_path("clip", clip_name1)
         clip_path2 = folder_paths.get_full_path("clip", clip_name2)
         clip_path3 = folder_paths.get_full_path("clip", clip_name3)
         clip_path4 = folder_paths.get_full_path("clip", clip_name4)
         clip_paths = (clip_path1, clip_path2, clip_path3, clip_path4)
         clip_type = getattr(comfy.sd.CLIPType, type.upper(), comfy.sd.CLIPType.STABLE_DIFFUSION)
-        return (self.load_patcher(clip_paths, clip_type, self.load_data(clip_paths)),)
+        return (self.load_patcher(clip_paths, clip_type, self.load_data(clip_paths), memory_mode),)
 
 NODE_CLASS_MAPPINGS = {
     "UnetLoaderGGUF": UnetLoaderGGUF,
