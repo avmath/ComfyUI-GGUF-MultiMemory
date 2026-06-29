@@ -1,14 +1,14 @@
 [project]
-name = "ComfyUI-GGUF"
-description = "GGUF Quantization support for native ComfyUI models."
+name = "ComfyUI-GGUF-MultiMemory"
+description = "GGUF quantization support for native ComfyUI models with selectable RAM/VRAM residency."
 version = "1.1.10" # 2.0.0 = GitHub main, 1.X.X = ComfyUI Registry
 license = { file = "LICENSE" }
 dependencies = ["gguf>=0.13.0", "sentencepiece", "protobuf"]
 
 [project.urls]
-Repository = "https://github.com/city96/ComfyUI-GGUF"
+Repository = "https://github.com/city96/ComfyUI-GGUF-MultiMemory"
 
 [tool.comfy]
 PublisherId = "city96"
-DisplayName = "ComfyUI-GGUF"
+DisplayName = "ComfyUI-GGUF-MultiMemory"
 Icon = ""

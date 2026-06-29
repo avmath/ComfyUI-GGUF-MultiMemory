@@ -1,5 +1,5 @@
-# ComfyUI-GGUF
-GGUF Quantization support for native ComfyUI models
+# ComfyUI-GGUF-MultiMemory
+GGUF quantization support for native ComfyUI models with selectable RAM/VRAM residency
 
 This is currently very much WIP. These custom nodes provide support for model files stored in the GGUF format popularized by [llama.cpp](https://github.com/ggerganov/llama.cpp).
 
@@ -17,21 +17,30 @@ Note: The "Force/Set CLIP Device" is **NOT** part of this node pack. Do not inst
 To install the custom node normally, git clone this repository into your custom nodes folder (`ComfyUI/custom_nodes`) and install the only dependency for inference (`pip install --upgrade gguf`)
 
 ```
-git clone https://github.com/city96/ComfyUI-GGUF
+git clone https://github.com/city96/ComfyUI-GGUF-MultiMemory
 ```
 
 To install the custom node on a standalone ComfyUI release, open a CMD inside the "ComfyUI_windows_portable" folder (where your `run_nvidia_gpu.bat` file is) and use the following commands:
 
 ```
-git clone https://github.com/city96/ComfyUI-GGUF ComfyUI/custom_nodes/ComfyUI-GGUF
-.\python_embeded\python.exe -s -m pip install -r .\ComfyUI\custom_nodes\ComfyUI-GGUF\requirements.txt
+git clone https://github.com/city96/ComfyUI-GGUF-MultiMemory ComfyUI/custom_nodes/ComfyUI-GGUF-MultiMemory
+.\python_embeded\python.exe -s -m pip install -r .\ComfyUI\custom_nodes\ComfyUI-GGUF-MultiMemory\requirements.txt
 ```
 
 On MacOS sequoia, torch 2.4.1 seems to be required, as 2.6.X nightly versions cause a "M1 buffer is not large enough" error. See [this issue](https://github.com/city96/ComfyUI-GGUF/issues/107) for more information/workarounds.
 
 ## Usage
 
-Simply use the GGUF Unet loader found under the `bootleg` category. Place the .gguf model files in your `ComfyUI/models/unet` folder.
+Simply use the GGUF loaders found under the `ComfyUI-GGUF-MultiMemory` category. Place the .gguf model files in your `ComfyUI/models/unet` folder.
+
+
+### Memory residency modes
+
+Every GGUF UNet and CLIP loader exposes a `memory_mode` selector:
+
+- `default (RAM<->VRAM)` keeps the original ComfyUI behavior: models may be moved between system RAM and VRAM by ComfyUI model management.
+- `RAM only` sets both the load and offload devices to CPU, so the loaded GGUF model is intended to stay in system RAM and run there instead of being swapped into VRAM. This is especially useful for benchmarking large text encoders loaded through `DualCLIPLoader (GGUF)`.
+- `VRAM only` sets both the load and offload devices to the active GPU/text-encoder device, avoiding ComfyUI offload back to RAM while VRAM is available.
 
 LoRA loading is experimental but it should work with just the built-in LoRA loader node(s).
 
@@ -46,4 +55,4 @@ Initial support for quantizing T5 has also been added recently, these can be use
 
 - [t5_v1.1-xxl GGUF](https://huggingface.co/city96/t5-v1_1-xxl-encoder-gguf)
 
-See the instructions in the [tools](https://github.com/city96/ComfyUI-GGUF/tree/main/tools) folder for how to create your own quants.
+See the instructions in the [tools](https://github.com/city96/ComfyUI-GGUF-MultiMemory/tree/main/tools) folder for how to create your own quants.
